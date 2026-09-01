@@ -7,7 +7,6 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 final class Organization extends Model
 {
-    #[\Override]
     protected $fillable = ['name', 'slug', 'owner_id', 'status', 'archived_at'];
 
     protected function casts(): array
