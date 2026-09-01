@@ -15,6 +15,7 @@ class TeamFactory extends Factory
      *
      * @var class-string<Team>
      */
+    #[\Override]
     protected $model = Team::class;
 
     /**

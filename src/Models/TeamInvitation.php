@@ -12,6 +12,7 @@ class TeamInvitation extends JetstreamTeamInvitation
      *
      * @var list<string>
      */
+    #[\Override]
     protected $fillable = [
         'email',
         'role',
@@ -22,6 +23,7 @@ class TeamInvitation extends JetstreamTeamInvitation
         'revoked_at',
     ];
 
+    #[\Override]
     protected $hidden = ['token_hash'];
 
     protected function casts(): array
