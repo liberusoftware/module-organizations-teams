@@ -21,7 +21,7 @@
       "name": "organizations-teams"
     }
   },
-  "version": "1.10.0",
+  "version": "1.10.1",
   "autoload-dev": {
     "psr-4": {
       "Liberu\\Foundation\\Organizations\\Tests\\": "tests/"
