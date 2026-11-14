@@ -9,7 +9,7 @@ use Illuminate\Support\Facades\Schema;
 
 beforeEach(function () {
     $this->previousSchemaApplication = Facade::getFacadeApplication();
-    $this->migrationContainer = new Container;
+    $this->migrationContainer = new Container();
     $this->migrationDatabase = new Capsule($this->migrationContainer);
     $this->migrationDatabase->addConnection(['driver' => 'sqlite', 'database' => ':memory:', 'prefix' => '']);
     $this->migrationContainer->instance('db.schema', $this->migrationDatabase->getConnection()->getSchemaBuilder());
@@ -32,7 +32,7 @@ function optionalResourceMigration(string $name): Migration
 
     require_once $directory.'2024_11_17_000000_add_team_id_to-staff_resource_tables.php';
 
-    return new AddTeamIdToStaffResourceTables;
+    return new AddTeamIdToStaffResourceTables();
 }
 
 it('leaves absent optional resource tables absent during migration and rollback', function (string $name) {
