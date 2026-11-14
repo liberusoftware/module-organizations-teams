@@ -28,6 +28,7 @@
     "Invitations",
     "Ownership",
     "Switching",
-    "Current-context boundaries"
+    "Current-context boundaries",
+    "Encrypted workspace settings excluded from serialization and mass assignment"
   ]
 }
