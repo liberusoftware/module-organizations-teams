@@ -2,8 +2,6 @@
 
 declare(strict_types=1);
 
-use App\Models\Territory;
-use App\Services\AuditLogService;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -30,6 +28,7 @@ use Liberu\Foundation\Organizations\Models\TeamInvitation;
 use Liberu\Foundation\Organizations\Support\AccessContext;
 use Liberu\Foundation\Organizations\Support\MembershipRolePolicy;
 use Liberu\Foundation\Organizations\Support\PortalCustomer;
+use Liberu\Foundation\Organizations\Tests\Fixtures\OrgTestTerritory;
 use Liberu\Foundation\Organizations\Tests\Fixtures\OrgTestUser;
 use Liberu\Foundation\RolesPermissions\Enums\Role;
 use Spatie\Permission\Models\Role as SpatieRole;
@@ -57,7 +56,6 @@ function createActionTeam(OrgTestUser $owner, array $overrides = []): Team
 
 beforeEach(function () {
     AccessContext::clear();
-    AuditLogService::reset();
 });
 
 afterEach(function () {
@@ -104,7 +102,7 @@ it('covers AccessContext restrictToOwnerId, restrictedTerritoryIds, and shouldMa
     $salesRole = SpatieRole::firstOrCreate(['name' => Role::SalesRep->value, 'guard_name' => 'web', 'team_id' => null]);
     $user->assignRole($salesRole);
 
-    $territory = Territory::create(['team_id' => $team->id, 'name' => 'EMEA']);
+    $territory = OrgTestTerritory::create(['team_id' => $team->id, 'name' => 'EMEA']);
     $territory->users()->attach($user->id);
 
     expect(AccessContext::restrictToOwnerId())->toBe($user->id)
@@ -266,11 +264,11 @@ it('covers Jetstream AddTeamMember, InviteTeamMember, and RemoveTeamMember actio
         ->and(TeamInvitation::where('email', $invitedUser->email)->exists())->toBeFalse();
 
     // Adding already-existing member fails validation
-    expect(fn () => $adder->add($owner, $team, $invitedUser->email, 'admin'))
+    expect(fn () => $adder->add($owner, $team->fresh(), $invitedUser->email, 'admin'))
         ->toThrow(ValidationException::class);
 
     // Inviting already-existing member fails validation
-    expect(fn () => $inviter->invite($owner, $team, $invitedUser->email, 'editor'))
+    expect(fn () => $inviter->invite($owner, $team->fresh(), $invitedUser->email, 'editor'))
         ->toThrow(ValidationException::class);
 
     // Add a second member directly (no pending invitation)

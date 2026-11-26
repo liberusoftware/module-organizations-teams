@@ -98,7 +98,7 @@ it('covers Membership, Organization, TeamOnboarding, TeamBackup, TeamInvitation 
         ->and($backup->creator())->toBeInstanceOf(BelongsTo::class)
         ->and($backup->creator->id)->toBe($owner->id);
 
-    $invitation = TeamInvitation::create([
+    $invitation = TeamInvitation::forceCreate([
         'team_id' => $team->id,
         'email' => 'invitee@example.test',
         'role' => 'sales_rep',
@@ -122,7 +122,6 @@ it('covers Team factory, global archived scope, archive/restore lifecycle, relat
     expect($shared->getActivitylogOptions()->logAttributes)->toContain('name', 'personal_team', 'user_id')
         ->and($shared->teamInvitations())->toBeInstanceOf(HasMany::class)
         ->and($shared->subscription())->toBeInstanceOf(HasOne::class)
-        ->and($shared->contacts())->toBeInstanceOf(HasMany::class)
         ->and($shared->isArchived())->toBeFalse();
 
     // Personal team cannot be archived
@@ -229,7 +228,7 @@ it('covers TeamPolicy for owner, member, and outsider', function () {
     $team = makeOrgTeam($owner);
     $team->users()->attach($member, ['role' => 'member']);
 
-    $invitation = TeamInvitation::create([
+    $invitation = TeamInvitation::forceCreate([
         'team_id' => $team->id,
         'email' => 'pending@example.test',
         'role' => 'sales_rep',

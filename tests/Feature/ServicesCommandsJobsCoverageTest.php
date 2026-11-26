@@ -2,9 +2,6 @@
 
 declare(strict_types=1);
 
-use App\Models\Branch;
-use App\Services\AuditLogService;
-use App\Support\SchemaGraph;
 use Illuminate\Contracts\Console\Kernel as ConsoleKernel;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Filesystem\Filesystem;
@@ -17,6 +14,7 @@ use Liberu\Foundation\Organizations\Console\Commands\BackupTeam;
 use Liberu\Foundation\Organizations\Console\Commands\CloneTeam;
 use Liberu\Foundation\Organizations\Console\Commands\ImportTeam;
 use Liberu\Foundation\Organizations\Console\Commands\RestoreTeam;
+use Liberu\Foundation\Organizations\Contracts\TeamAuditLogger;
 use Liberu\Foundation\Organizations\Exceptions\TeamImportException;
 use Liberu\Foundation\Organizations\Exceptions\TeamNotEmptyException;
 use Liberu\Foundation\Organizations\Exceptions\TeamRestoreException;
@@ -31,8 +29,13 @@ use Liberu\Foundation\Organizations\Services\TeamBackupService;
 use Liberu\Foundation\Organizations\Services\TeamCloneService;
 use Liberu\Foundation\Organizations\Services\TeamManagementService;
 use Liberu\Foundation\Organizations\Services\TeamRestoreService;
+use Liberu\Foundation\Organizations\Support\SchemaGraph;
+use Liberu\Foundation\Organizations\Tests\Fixtures\OrgTestMenu;
+use Liberu\Foundation\Organizations\Tests\Fixtures\OrgTestPipeline;
+use Liberu\Foundation\Organizations\Tests\Fixtures\OrgTestStage;
 use Liberu\Foundation\Organizations\Tests\Fixtures\OrgTestTenantItem;
 use Liberu\Foundation\Organizations\Tests\Fixtures\OrgTestUser;
+use Liberu\Foundation\Organizations\Tests\Fixtures\RecordingTeamAuditLogger;
 use Liberu\Foundation\RolesPermissions\Enums\Role;
 use Liberu\Foundation\RolesPermissions\Support\RolePermissionCatalog;
 use Spatie\Permission\Models\Permission;
@@ -74,8 +77,23 @@ function setupTenantBackupFixture(): array
         $root.'/app/Models/OrgTestTenantItem.php',
         "<?php\nnamespace Liberu\\Foundation\\Organizations\\Tests\\Fixtures;\nclass OrgTestTenantItem {}\n",
     );
+    file_put_contents(
+        $root.'/app/Models/OrgTestMissingTableItem.php',
+        "<?php\nnamespace Liberu\\Foundation\\Organizations\\Tests\\Fixtures;\nclass OrgTestMissingTableItem {}\n",
+    );
+    file_put_contents(
+        $root.'/app/Models/OrgTestSimpleItem.php',
+        "<?php\nnamespace Liberu\\Foundation\\Organizations\\Tests\\Fixtures;\nclass OrgTestSimpleItem {}\n",
+    );
 
     app()->instance('path.base', $root);
+
+    Schema::dropIfExists('org_test_simple_items');
+    Schema::create('org_test_simple_items', function (Blueprint $table): void {
+        $table->id();
+        $table->unsignedBigInteger('team_id');
+        $table->string('name');
+    });
 
     Schema::dropIfExists('org_test_tenant_items');
     Schema::create('org_test_tenant_items', function (Blueprint $table): void {
@@ -86,6 +104,8 @@ function setupTenantBackupFixture(): array
         $table->unsignedBigInteger('org_test_tenant_item_id')->nullable();
         $table->string('name');
         $table->timestamps();
+        $table->foreign('team_id')->references('id')->on('teams');
+        $table->foreign('parent_id')->references('id')->on('org_test_tenant_items');
     });
 
     return ['root' => $root, 'originalBase' => $originalBase];
@@ -95,14 +115,12 @@ function teardownTenantBackupFixture(array $fixture): void
 {
     app()->instance('path.base', $fixture['originalBase']);
     Schema::dropIfExists('org_test_tenant_items');
+    Schema::dropIfExists('org_test_simple_items');
     (new Filesystem())->deleteDirectory($fixture['root']);
-    SchemaGraph::$mockEdges = [];
 }
 
 afterEach(function () {
     Auth::logout();
-    AuditLogService::reset();
-    SchemaGraph::$mockEdges = [];
 });
 
 it('covers CurrentTeamResolver for null, active membership, time windows, owner, and outsider', function () {
@@ -142,7 +160,9 @@ it('covers CurrentTeamResolver for null, active membership, time windows, owner,
 });
 
 it('covers TeamManagementService member lifecycle, roles, custom roles, defaults, and switching', function () {
-    $service = new TeamManagementService();
+    $auditLogger = new RecordingTeamAuditLogger();
+    app()->instance(TeamAuditLogger::class, $auditLogger);
+    $service = new TeamManagementService($auditLogger);
     $owner = createServiceUser();
     $existing = createServiceUser();
     $outsider = createServiceUser();
@@ -169,7 +189,7 @@ it('covers TeamManagementService member lifecycle, roles, custom roles, defaults
     // Valid createTeamMember
     $created = $service->createTeamMember($team, 'Alice Member', 'alice-new@example.test', 'StrongPassword123!', Role::Manager);
     expect($created->email)->toBe('alice-new@example.test')
-        ->and(AuditLogService::$recorded)->not->toBeEmpty();
+        ->and($auditLogger->recorded)->not->toBeEmpty();
 
     // addTeamMember invalid role
     expect(fn () => $service->addTeamMember($existing, $team, Role::Customer))
@@ -201,7 +221,14 @@ it('covers TeamManagementService member lifecycle, roles, custom roles, defaults
     expect(fn () => $service->assignCustomRole($existing, $team, $otherTeamRole))
         ->toThrow(InvalidArgumentException::class, 'The role does not belong to this team.');
 
-    $systemNamedRole = SpatieRole::create(['name' => 'admin', 'guard_name' => 'web', 'team_id' => $team->id]);
+    $systemNamedRoleId = DB::table('roles')->insertGetId([
+        'name' => 'admin',
+        'guard_name' => 'web',
+        'team_id' => $team->id,
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+    $systemNamedRole = SpatieRole::findOrFail($systemNamedRoleId);
     expect(fn () => $service->assignCustomRole($existing, $team, $systemNamedRole))
         ->toThrow(InvalidArgumentException::class, 'This custom role contains permissions that cannot be assigned by a team owner.');
 
@@ -229,24 +256,6 @@ it('covers TeamManagementService member lifecycle, roles, custom roles, defaults
         ->toThrow(InvalidArgumentException::class, 'The team owner cannot be removed.');
     expect(fn () => $service->assignCustomRole($owner, $team, $customRole))
         ->toThrow(InvalidArgumentException::class, "The team owner's role cannot be changed.");
-
-    // createDefaultTeamForUser (no branch -> throws; with branch -> creates)
-    Schema::create('org_test_branches', function (Blueprint $table): void {
-        $table->id();
-        $table->string('name');
-        $table->timestamps();
-    });
-
-    try {
-        expect(fn () => $service->createDefaultTeamForUser($outsider))
-            ->toThrow(Exception::class, 'No default branch found.');
-
-        Branch::create(['name' => 'HQ']);
-        $branchTeam = $service->createDefaultTeamForUser($outsider);
-        expect($branchTeam->name)->toBe('HQ Team');
-    } finally {
-        Schema::dropIfExists('org_test_branches');
-    }
 
     // createPersonalTeamForUser
     $personal = $service->createPersonalTeamForUser($outsider);
@@ -309,11 +318,20 @@ it('covers TeamBackupService, TeamRestoreService, and ImportTeamBackupService en
             'updated_at' => now(),
         ]);
 
-        // 1. Backup
+        DB::table('org_test_simple_items')->insert([
+            'team_id' => $teamA->id,
+            'name' => 'Simple Item',
+        ]);
+
+        // 1. Backup (also verify missing extra table is skipped cleanly)
         $backupService = new TeamBackupService();
         $result = $backupService->backup($teamA, 'local');
         Storage::disk('local')->assertExists($result['path']);
         expect($result['size'])->toBeGreaterThan(0);
+
+        Schema::dropIfExists('team_invitations');
+        $backupWithoutInvitations = $backupService->backup($teamA, 'local');
+        expect($backupWithoutInvitations['size'])->toBeGreaterThan(0);
 
         $backup = TeamBackup::create([
             'team_id' => $teamA->id,
@@ -367,12 +385,23 @@ it('covers TeamBackupService, TeamRestoreService, and ImportTeamBackupService en
         expect(fn () => $restoreService->restore($missingTeamBackup))->toThrow(TeamRestoreException::class, 'no longer exists');
 
         // Non-empty team refused
-        expect($restoreService->firstPopulatedTable($teamA))->toBe('org_test_tenant_items');
+        expect($restoreService->firstPopulatedTable($teamA))->toBe('org_test_simple_items');
         expect(fn () => $restoreService->restore($backup))->toThrow(TeamNotEmptyException::class);
 
         // Empty teamA -> restore succeeds with original PKs
         DB::table('org_test_tenant_items')->where('team_id', $teamA->id)->delete();
+        DB::table('org_test_simple_items')->where('team_id', $teamA->id)->delete();
         expect($restoreService->firstPopulatedTable($teamA))->toBeNull();
+
+        // Manifest-only zip skips missing model files cleanly on both restore and import
+        $emptyModelsPath = Storage::disk('local')->path('backups/empty-models.zip');
+        $z4 = new ZipArchive();
+        $z4->open($emptyModelsPath, ZipArchive::CREATE);
+        $z4->addFromString('manifest.json', json_encode(['format_version' => 1, 'team' => ['id' => $teamA->id, 'name' => 'Manifest Only']]));
+        $z4->close();
+        $emptyModelsBackup = TeamBackup::create(['team_id' => $teamA->id, 'disk' => 'local', 'path' => 'backups/empty-models.zip', 'status' => 'completed']);
+        expect($restoreService->restore($emptyModelsBackup))->toBe([]);
+        expect((new ImportTeamBackupService())->import($emptyModelsPath, null, $importer)->name)->toBe('Manifest Only');
 
         $counts = $restoreService->restore($backup);
         expect($counts['OrgTestTenantItem'])->toBe(2)
@@ -389,12 +418,7 @@ it('covers TeamBackupService, TeamRestoreService, and ImportTeamBackupService en
             ->toThrow(TeamImportException::class);
 
         // Valid import with FK remapping (declared + user ref + undeclared *_id)
-        SchemaGraph::$mockEdges = [
-            'org_test_tenant_items' => [
-                'team_id' => 'teams',
-                'parent_id' => 'org_test_tenant_items',
-            ],
-        ];
+        expect(SchemaGraph::edges(['nonexistent_table']))->toBe([]);
         $importedTeam = $importService->import(Storage::disk('local')->path($result['path']), 'Imported Team', $importer);
         expect($importedTeam->name)->toBe('Imported Team')
             ->and($importedTeam->user_id)->toBe($importer->id);
@@ -442,7 +466,14 @@ it('covers TeamCloneService cloning config tables and remapping FK edges', funct
             ['team_id' => $source->id, 'pipeline_id' => 999999, 'name' => 'Dangling', 'created_at' => now(), 'updated_at' => now()],
         ]);
 
-        $cloned = (new TeamCloneService())->clone($source, 'Cloned Workspace', $owner);
+        $cloned = (new TeamCloneService(
+            [OrgTestPipeline::class, OrgTestStage::class, OrgTestMenu::class],
+            [
+                OrgTestStage::class => ['pipeline_id' => OrgTestPipeline::class],
+                OrgTestPipeline::class => ['nonexistent_col' => OrgTestPipeline::class],
+                'NonExistentModelClass' => ['foo_id' => OrgTestPipeline::class],
+            ],
+        ))->clone($source, 'Cloned Workspace', $owner);
 
         expect($cloned->name)->toBe('Cloned Workspace')
             ->and($cloned->id)->not->toBe($source->id);
@@ -476,7 +507,8 @@ it('covers GenerateTeamBackup, ImportTeamBackup, and RestoreTeamBackup jobs (suc
 
         // GenerateTeamBackup failure
         $failingBackup = TeamBackup::create(['team_id' => $team->id, 'disk' => 'local', 'status' => 'pending']);
-        $failingService = new class() extends TeamBackupService {
+        $failingService = new class() extends TeamBackupService
+        {
             public function backup(Team $team, ?string $disk = null): array
             {
                 throw new RuntimeException('disk full');
@@ -551,7 +583,9 @@ it('covers BackupTeam, CloneTeam, ImportTeam, and RestoreTeam artisan commands',
 
         $this->artisan('team:import', ['path' => $zipPath, '--owner' => 999999])->assertFailed();
         $this->artisan('team:import', ['path' => $zipPath, '--name' => 'CLI Import', '--owner' => $owner->id])->assertSuccessful();
-        expect(Team::where('name', 'CLI Import')->exists())->toBeTrue();
+        $this->artisan('team:import', ['path' => $zipPath, '--name' => 'CLI Default Owner'])->assertSuccessful();
+        expect(Team::where('name', 'CLI Import')->exists())->toBeTrue()
+            ->and(Team::where('name', 'CLI Default Owner')->exists())->toBeTrue();
     } finally {
         teardownTenantBackupFixture($fixture);
     }
